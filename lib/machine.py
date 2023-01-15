@@ -5,6 +5,7 @@ import logging
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import tempfile
 from types import TracebackType
@@ -19,6 +20,7 @@ from typing import (
     TypeVar,
 )
 from ..utils.macaddr import randommac
+from .console import ConsoleSocket
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +93,7 @@ class QEMUMachine:
                  name: Optional[str] = None,
                  base_temp_dir: str = "/var/tmp",
                  sock_dir: Optional[str] = None,
+                 console_log: Optional[str] = None,
                  log_dir: Optional[str] = None):
         """
         Initialize a QEMUMachine
@@ -104,6 +107,7 @@ class QEMUMachine:
         self._base_temp_dir = base_temp_dir
         self._sock_dir = sock_dir
         self._log_dir = log_dir
+        self._console_log_path = console_log
 
         # Runstate
         self._qemu_log_path: Optional[str] = None
@@ -126,6 +130,7 @@ class QEMUMachine:
         self._console_address = os.path.join(
             self.sock_dir, f"{self._name}-console.sock"
         )
+        self._console_socket: Optional[socket.socket] = None
         self._remove_files: List[str] = []
         self._user_killed = False
         self._quit_issued = False
@@ -354,11 +359,21 @@ class QEMUMachine:
                                        close_fds=False)
         self._launched = True
 
+    def _early_cleanup(self) -> None:
+        """
+        Cleanup the VM before we try to kill it
+        """
+        if self._console_socket is not None:
+            logger.debug('Closing console socket')
+            self._console_socket.close()
+            self._console_socket = None
+
     def _hard_shutdown(self) -> None:
         """
         Perform early cleanup, kill the VM, and wait for it to terminate.
         """
         logger.debug("Performing hard shutdown")
+        self._early_cleanup()
         self._subp.kill()
         self._subp.wait(timeout=60)
 
@@ -368,6 +383,8 @@ class QEMUMachine:
         for it to terminate.
         """
         logger.debug("Attempting graceful termination")
+        self._early_cleanup()
+
         if self._quit_issued:
             logger.debug(
                 "Anticipating QEMU termination due to prior 'quit' command, "
@@ -542,6 +559,19 @@ class QEMUMachine:
         self._kernel_args.extend(['-kernel', kernel_path])
         if kernel_append is not None:
             self._kernel_args.extend(['-append', kernel_append])
+
+    @property
+    def console_socket(self) -> socket.socket:
+        """
+        Returns the socket used to communicate with the console device
+        """
+        if self._console_socket is None:
+            self._console_socket = ConsoleSocket(
+                self._console_address,
+                file=self._console_log_path,
+                drain=True,
+            )
+        return self._console_socket
 
     @property
     def temp_dir(self) -> str:
